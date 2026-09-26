@@ -4,8 +4,8 @@ Lab 11 — Configuration, provider selection, API keys.
 Hai tầng model (không trộn):
 
   Blue Team (CP2–CP3, guardrails / pipeline / protected agent)
-    → CỐ ĐỊNH OpenRouter ``liquid/lfm-2.5-2.6b``
-       https://openrouter.ai/liquid/lfm-2.5-2.6b
+    → CỐ ĐỊNH OpenRouter ``liquid/lfm-2.5-2.6b:free``
+       https://openrouter.ai/liquid/lfm-2.5-2.6b:free
     → Cần ``OPENROUTER_API_KEY``
 
   Red Team (CP4)
@@ -36,7 +36,7 @@ PROVIDER_OPENROUTER = "openrouter"
 
 # --- Blue Team (LOCKED) ---
 BLUE_PROVIDER = PROVIDER_OPENROUTER
-BLUE_MODEL = "liquid/lfm-2.5-2.6b"
+BLUE_MODEL = "liquid/lfm-2.5-2.6b:free"
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 DEFAULT_OPENROUTER_MODEL = BLUE_MODEL  # alias
 
@@ -120,6 +120,13 @@ def blue_client_kwargs() -> dict:
             os.environ.get("OPENROUTER_BASE_URL", OPENROUTER_BASE_URL).strip()
             or OPENROUTER_BASE_URL
         ),
+        # Mặc định SDK chờ 600s/request → gói :free kẹt hàng đợi trông như treo.
+        # Cắt ở 60s (đo thực tế ~6–12s/câu).
+        "timeout": float(os.environ.get("OPENROUTER_TIMEOUT", "60")),
+        # SDK retry ngắn (lỗi mạng / 429 thoáng qua). 429 kéo dài của gói :free do
+        # OpenAIRunner._complete đợi lâu hơn rồi gọi lại — chỉ gọi lại LLM, plugin
+        # (rate limiter) KHÔNG bị chạy lại / đếm trùng.
+        "max_retries": int(os.environ.get("OPENROUTER_MAX_RETRIES", "2")),
     }
 
 

@@ -40,18 +40,60 @@ class MonitoringAlert:
     rate_limit_hits: int = 0
     judge_checks: int = 0
     judge_fails: int = 0
+    # Bổ sung: lỗi API (quota/timeout) — không phải "bị chặn" nhưng cần được thấy
+    errors: int = 0
+    error_threshold: int = 1
+    blocked_by_layer: dict[str, int] = field(default_factory=dict)
+
+    def record_request(self, *, blocked: bool, layer: str | None, error: str | None = None):
+        """Cập nhật bộ đếm sau mỗi request (pipeline gọi, không phụ thuộc framework)."""
+        self.total_requests += 1
+        if blocked:
+            self.blocked_requests += 1
+            key = layer or "unknown"
+            self.blocked_by_layer[key] = self.blocked_by_layer.get(key, 0) + 1
+        if layer == "rate_limiter":
+            self.rate_limit_hits += 1
+        if error:
+            self.errors += 1
 
     def check_metrics(self) -> list[Alert]:
-        """TODO: compute rates, append Alert objects when thresholds exceeded."""
-        raise NotImplementedError("Implement MonitoringAlert.check_metrics")
+        """Compute rates, append Alert objects when thresholds exceeded."""
+        snap = self.snapshot()
+        # Tính lại từ đầu mỗi lần gọi → gọi nhiều lần không sinh alert trùng lặp
+        self.alerts = []
+        if self.total_requests and snap["block_rate"] > self.block_rate_threshold:
+            self.alerts.append(Alert(
+                "block_rate", snap["block_rate"], self.block_rate_threshold,
+                f"Block rate {snap['block_rate']:.0%} > {self.block_rate_threshold:.0%}: "
+                "đang bị tấn công dồn dập HOẶC filter chặn nhầm hàng loạt — cần người xem audit log.",
+            ))
+        if self.rate_limit_hits >= self.rate_limit_hit_threshold:
+            self.alerts.append(Alert(
+                "rate_limit_hits", self.rate_limit_hits, self.rate_limit_hit_threshold,
+                f"{self.rate_limit_hits} lần chạm rate limit: có dấu hiệu flooding / cost attack.",
+            ))
+        if self.judge_checks and snap["judge_fail_rate"] > self.judge_fail_rate_threshold:
+            self.alerts.append(Alert(
+                "judge_fail_rate", snap["judge_fail_rate"], self.judge_fail_rate_threshold,
+                f"Judge fail rate {snap['judge_fail_rate']:.0%}: model trả lời không an toàn nhiều.",
+            ))
+        if self.errors >= self.error_threshold:
+            self.alerts.append(Alert(
+                "errors", self.errors, self.error_threshold,
+                f"{self.errors} request lỗi (API/quota/timeout) — kết quả suite có thể thiếu.",
+            ))
+        return self.alerts
 
     def export_json(self, filepath: str | None = None):
-        """TODO: write metrics + alerts to JSON under repo-root ``outputs/`` by default.
-        Use ``filepath or default_metrics_path()`` so running from ``src/`` does not
-        create ``src/outputs/``.
-        """
-        _ = filepath or default_metrics_path()
-        raise NotImplementedError("Implement MonitoringAlert.export_json")
+        """Write metrics + alerts to JSON under repo-root ``outputs/`` by default."""
+        path = Path(filepath or default_metrics_path())
+        path.parent.mkdir(parents=True, exist_ok=True)
+        data = self.snapshot()
+        data["errors"] = self.errors
+        data["blocked_by_layer"] = dict(self.blocked_by_layer)
+        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        return path
 
     def snapshot(self) -> dict:
         block_rate = (

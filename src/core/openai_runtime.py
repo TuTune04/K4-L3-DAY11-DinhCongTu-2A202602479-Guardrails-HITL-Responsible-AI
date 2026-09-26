@@ -1,13 +1,14 @@
 """
 OpenAI SDK runtime — dùng cho:
 
-  Blue Team → OpenRouter liquid/lfm-2.5-2.6b (create_blue_pair)
+  Blue Team → OpenRouter liquid/lfm-2.5-2.6b:free (create_blue_pair)
   Red Team  → OpenAI gpt-4o-mini (create_openai_pair) khi RED_TEAM_PROVIDER=openai
 
 Gemini Red Team dùng Google ADK trong agents/*.py — không đi qua file này.
 """
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -45,6 +46,11 @@ class OpenAIRunner:
     client_kwargs: dict = field(default_factory=dict)
     input_hooks: list[Callable[[str], str | None]] = field(default_factory=list)
     output_hooks: list[Callable[[str], str]] = field(default_factory=list)
+    # Số lời gọi LLM đồng thời tối đa — gửi dồn vào gói :free chỉ đổi lấy 429
+    llm_concurrency: int = 2
+    # Các khoảng đợi (giây) khi provider trả 429, sau khi SDK đã tự retry ngắn
+    rate_limit_backoff: tuple = (10, 20, 30, 45)
+    _llm_slots: Any = field(default=None, init=False, repr=False)
 
     def _client(self):
         from openai import OpenAI
@@ -61,22 +67,47 @@ class OpenAIRunner:
         if block_msg is not None:
             return block_msg
 
-        client = self._client()
-        completion = client.chat.completions.create(
-            model=self.model,
-            messages=[
-                {"role": "system", "content": agent.instruction},
-                {"role": "user", "content": user_message},
-            ],
-            temperature=self.temperature,
-        )
-        text = (completion.choices[0].message.content or "").strip()
+        text = await self._complete(agent, user_message)
 
         for hook in self.output_hooks:
             text = hook(text)
 
         text = await self._run_output_plugins(text)
         return text
+
+    async def _complete(self, agent: OpenAIAgent, user_message: str) -> str:
+        """Gọi LLM — chỉ bước này được retry, plugin KHÔNG chạy lại (rate limiter không đếm trùng)."""
+        from openai import RateLimitError
+
+        if self._llm_slots is None:
+            # Tạo lazily trong event loop đang chạy
+            self._llm_slots = asyncio.Semaphore(self.llm_concurrency)
+        client = self._client()
+        messages = [
+            {"role": "system", "content": agent.instruction},
+            {"role": "user", "content": user_message},
+        ]
+        delays = list(self.rate_limit_backoff)
+        async with self._llm_slots:
+            while True:
+                try:
+                    # SDK là sync → chạy trong thread để không chặn event loop
+                    # (request khác vẫn đi qua plugin trong lúc chờ LLM)
+                    completion = await asyncio.to_thread(
+                        client.chat.completions.create,
+                        model=self.model,
+                        messages=messages,
+                        temperature=self.temperature,
+                    )
+                    return (completion.choices[0].message.content or "").strip()
+                except RateLimitError:
+                    # Gói :free hay trả 429 "rate-limited upstream" kéo dài cả chục giây —
+                    # retry ngắn của SDK không đủ, đợi lâu dần rồi thử lại.
+                    if not delays:
+                        raise
+                    wait = delays.pop(0)
+                    print(f"    (429 từ provider — đợi {wait}s rồi thử lại)", flush=True)
+                    await asyncio.sleep(wait)
 
     async def _run_input_plugins(self, user_message: str) -> str | None:
         if not self.plugins:
@@ -191,7 +222,7 @@ def create_blue_pair(
     output_hooks: list | None = None,
     temperature: float = 0.4,
 ) -> tuple[OpenAIAgent, OpenAIRunner]:
-    """Blue Team — always OpenRouter liquid/lfm-2.5-2.6b."""
+    """Blue Team — always OpenRouter liquid/lfm-2.5-2.6b:free."""
     return _make_pair(
         name=name,
         instruction=instruction,

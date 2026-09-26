@@ -7,6 +7,7 @@ guardrail layers do not address (flooding / cost attacks).
 from __future__ import annotations
 
 from collections import defaultdict, deque
+import contextvars
 import time
 
 from google.adk.plugins import base_plugin
@@ -23,6 +24,18 @@ class RateLimitPlugin(base_plugin.BasePlugin):
         self.user_windows: dict[str, deque] = defaultdict(deque)
         self.blocked_count = 0
         self.total_count = 0
+        # Kết quả request gần nhất → pipeline điền "layer" mà không phải đoán từ text.
+        # ContextVar: mỗi asyncio task (request chạy song song) thấy giá trị CỦA NÓ,
+        # request khác không ghi đè được.
+        self._last_blocked = contextvars.ContextVar(f"rl_last_blocked_{id(self)}", default=False)
+
+    @property
+    def last_blocked(self) -> bool:
+        return self._last_blocked.get()
+
+    @last_blocked.setter
+    def last_blocked(self, value: bool):
+        self._last_blocked.set(value)
 
     def _block_response(self, message: str) -> types.Content:
         return types.Content(
@@ -37,13 +50,21 @@ class RateLimitPlugin(base_plugin.BasePlugin):
         now = time.time()
         window = self.user_windows[user_id]
 
-        # TODO: Implement sliding window:
-        # 1. Pop timestamps older than (now - window_seconds) from the left
-        # 2. If len(window) >= max_requests:
-        #       wait = window_seconds - (now - window[0])
-        #       self.blocked_count += 1
-        #       return self._block_response(
-        #           f"Rate limit exceeded. Try again in {wait:.0f}s."
-        #       )
-        # 3. Else: append now, return None
-        raise NotImplementedError("Implement RateLimitPlugin.on_user_message_callback")
+        # 1. Cửa sổ trượt: bỏ mốc ra khỏi 60s gần nhất (mốc cũ luôn ở đầu deque → O(1))
+        while window and window[0] <= now - self.window_seconds:
+            window.popleft()
+
+        # 2. Đầy cửa sổ → chặn. KHÔNG ghi mốc cho request bị chặn, nếu không
+        #    user spam liên tục sẽ bị khóa vĩnh viễn (cửa sổ không bao giờ vơi).
+        if len(window) >= self.max_requests:
+            wait = self.window_seconds - (now - window[0])
+            self.blocked_count += 1
+            self.last_blocked = True
+            return self._block_response(
+                f"Rate limit exceeded. Try again in {max(wait, 1):.0f}s."
+            )
+
+        # 3. Còn chỗ → ghi mốc, cho qua
+        window.append(now)
+        self.last_blocked = False
+        return None

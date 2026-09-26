@@ -1,0 +1,28 @@
+{
+  "total_requests": 35,
+  "blocked_requests": 16,
+  "block_rate": 0.45714285714285713,
+  "rate_limit_hits": 5,
+  "judge_checks": 0,
+  "judge_fails": 0,
+  "judge_fail_rate": 0.0,
+  "alerts": [
+    {
+      "metric": "rate_limit_hits",
+      "value": 5,
+      "threshold": 5,
+      "message": "5 lần chạm rate limit: có dấu hiệu flooding / cost attack."
+    },
+    {
+      "metric": "errors",
+      "value": 1,
+      "threshold": 1,
+      "message": "1 request lỗi (API/quota/timeout) — kết quả suite có thể thiếu."
+    }
+  ],
+  "errors": 1,
+  "blocked_by_layer": {
+    "input_guardrail": 11,
+    "rate_limiter": 5
+  }
+}
